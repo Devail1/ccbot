@@ -2,80 +2,51 @@
 set -euo pipefail
 
 TMUX_SESSION="ccbot"
-TMUX_WINDOW="__main__"
-TARGET="${TMUX_SESSION}:${TMUX_WINDOW}"
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-MAX_WAIT=10  # seconds to wait for process to exit
+MAX_WAIT=10
 
-# Check if tmux session and window exist
-if ! tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
-    echo "Error: tmux session '$TMUX_SESSION' does not exist"
-    exit 1
+# Kill any running ccbot python processes directly
+echo "Stopping ccbot processes..."
+pkill -f 'uv run ccbot' 2>/dev/null || true
+pkill -f 'ccbot/.venv/bin/ccbot' 2>/dev/null || true
+
+waited=0
+while pgrep -f 'ccbot/.venv/bin/ccbot' >/dev/null 2>&1 && [ "$waited" -lt "$MAX_WAIT" ]; do
+    sleep 1
+    waited=$((waited + 1))
+    echo "  Waiting for process to exit... (${waited}s/${MAX_WAIT}s)"
+done
+
+if pgrep -f 'ccbot/.venv/bin/ccbot' >/dev/null 2>&1; then
+    echo "Force killing..."
+    pkill -9 -f 'ccbot/.venv/bin/ccbot' 2>/dev/null || true
+    sleep 1
 fi
+echo "Process stopped."
 
-if ! tmux list-windows -t "$TMUX_SESSION" -F '#{window_name}' 2>/dev/null | grep -qx "$TMUX_WINDOW"; then
-    echo "Error: window '$TMUX_WINDOW' not found in session '$TMUX_SESSION'"
-    exit 1
-fi
-
-# Get the pane PID and check if uv run ccbot is running
-PANE_PID=$(tmux list-panes -t "$TARGET" -F '#{pane_pid}')
-
-is_ccbot_running() {
-    pstree -a "$PANE_PID" 2>/dev/null | grep -q 'uv.*run ccbot\|ccbot.*\.venv/bin/ccbot'
-}
-
-# Stop existing process if running
-if is_ccbot_running; then
-    echo "Found running ccbot process, sending Ctrl-C..."
-    tmux send-keys -t "$TARGET" C-c
-
-    # Wait for process to exit
-    waited=0
-    while is_ccbot_running && [ "$waited" -lt "$MAX_WAIT" ]; do
-        sleep 1
-        waited=$((waited + 1))
-        echo "  Waiting for process to exit... (${waited}s/${MAX_WAIT}s)"
-    done
-
-    if is_ccbot_running; then
-        echo "Process did not exit after ${MAX_WAIT}s, sending SIGTERM..."
-        # Kill the uv process directly
-        UV_PID=$(pstree -ap "$PANE_PID" 2>/dev/null | grep -oP 'uv,\K\d+' | head -1)
-        if [ -n "$UV_PID" ]; then
-            kill "$UV_PID" 2>/dev/null || true
-            sleep 2
-        fi
-        if is_ccbot_running; then
-            echo "Process still running, sending SIGKILL..."
-            kill -9 "$UV_PID" 2>/dev/null || true
-            sleep 1
-        fi
-    fi
-
-    echo "Process stopped."
-else
-    echo "No ccbot process running in $TARGET"
-fi
-
-# Brief pause to let the shell settle
+# Kill existing tmux server and start fresh
+# Avoids orphaned windows and stale state
+echo "Restarting tmux session..."
+tmux kill-server 2>/dev/null || true
 sleep 1
 
-# Start ccbot
-echo "Starting ccbot in $TARGET..."
-tmux send-keys -t "$TARGET" "cd ${PROJECT_DIR} && uv run ccbot" Enter
+# Clear Claude Code env vars so child windows can launch claude without
+# "nested session" errors (restart.sh is often invoked from a Claude session)
+unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT
 
-# Verify startup and show logs
+tmux new-session -d -s "$TMUX_SESSION" -x 120 -y 40 -c "$PROJECT_DIR" "uv run ccbot"
+
+# Verify startup
 sleep 3
-if is_ccbot_running; then
+if pgrep -f 'ccbot/.venv/bin/ccbot' >/dev/null 2>&1; then
     echo "ccbot restarted successfully. Recent logs:"
     echo "----------------------------------------"
-    tmux capture-pane -t "$TARGET" -p | tail -20
+    tmux capture-pane -t "${TMUX_SESSION}:0" -p 2>/dev/null | tail -20
     echo "----------------------------------------"
 else
     echo "Warning: ccbot may not have started. Pane output:"
     echo "----------------------------------------"
-    tmux capture-pane -t "$TARGET" -p | tail -30
+    tmux capture-pane -t "${TMUX_SESSION}:0" -p 2>/dev/null | tail -30
     echo "----------------------------------------"
     exit 1
 fi
