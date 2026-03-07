@@ -18,11 +18,20 @@ def _reset_client():
 
 @pytest.fixture
 def mock_config():
-    """Patch config with test values."""
+    """Patch config with test values for OpenAI backend."""
     with patch.object(transcribe, "config") as cfg:
         cfg.openai_api_key = "sk-test-key"
         cfg.openai_base_url = "https://api.openai.com/v1"
+        cfg.whisper_backend = "openai"
         yield cfg
+
+
+@pytest.fixture
+def ogg_file(tmp_path):
+    """Create a temporary OGG file with fake data."""
+    f = tmp_path / "test.ogg"
+    f.write_bytes(b"fake-ogg-data")
+    return f
 
 
 def _mock_response(*, json_data: dict, status_code: int = 200) -> httpx.Response:
@@ -32,14 +41,14 @@ def _mock_response(*, json_data: dict, status_code: int = 200) -> httpx.Response
     return resp
 
 
-class TestTranscribeVoice:
+class TestTranscribeOpenAI:
     @pytest.mark.asyncio
-    async def test_success(self, mock_config):
+    async def test_success(self, mock_config, ogg_file):
         resp = _mock_response(json_data={"text": "Hello world"})
         with patch.object(
             httpx.AsyncClient, "post", new_callable=AsyncMock, return_value=resp
         ) as mock_post:
-            result = await transcribe.transcribe_voice(b"fake-ogg-data")
+            result = await transcribe.transcribe(ogg_file)
 
         assert result == "Hello world"
         mock_post.assert_called_once()
@@ -47,65 +56,86 @@ class TestTranscribeVoice:
         assert "Bearer sk-test-key" in str(call_kwargs)
 
     @pytest.mark.asyncio
-    async def test_empty_transcription_raises(self, mock_config):
+    async def test_empty_transcription_raises(self, mock_config, ogg_file):
         resp = _mock_response(json_data={"text": ""})
         with patch.object(
             httpx.AsyncClient, "post", new_callable=AsyncMock, return_value=resp
         ):
-            with pytest.raises(ValueError, match="Empty transcription"):
-                await transcribe.transcribe_voice(b"fake-ogg-data")
+            with pytest.raises(
+                transcribe.TranscriptionError, match="Empty transcription"
+            ):
+                await transcribe.transcribe(ogg_file)
 
     @pytest.mark.asyncio
-    async def test_whitespace_only_raises(self, mock_config):
+    async def test_whitespace_only_raises(self, mock_config, ogg_file):
         resp = _mock_response(json_data={"text": "   "})
         with patch.object(
             httpx.AsyncClient, "post", new_callable=AsyncMock, return_value=resp
         ):
-            with pytest.raises(ValueError, match="Empty transcription"):
-                await transcribe.transcribe_voice(b"fake-ogg-data")
+            with pytest.raises(
+                transcribe.TranscriptionError, match="Empty transcription"
+            ):
+                await transcribe.transcribe(ogg_file)
 
     @pytest.mark.asyncio
-    async def test_missing_text_field_raises(self, mock_config):
+    async def test_missing_text_field_raises(self, mock_config, ogg_file):
         resp = _mock_response(json_data={"result": "something"})
         with patch.object(
             httpx.AsyncClient, "post", new_callable=AsyncMock, return_value=resp
         ):
-            with pytest.raises(ValueError, match="Empty transcription"):
-                await transcribe.transcribe_voice(b"fake-ogg-data")
+            with pytest.raises(
+                transcribe.TranscriptionError, match="Empty transcription"
+            ):
+                await transcribe.transcribe(ogg_file)
 
     @pytest.mark.asyncio
-    async def test_api_error_raises(self, mock_config):
+    async def test_api_error_raises(self, mock_config, ogg_file):
         resp = _mock_response(json_data={"error": "Unauthorized"}, status_code=401)
         with patch.object(
             httpx.AsyncClient, "post", new_callable=AsyncMock, return_value=resp
         ):
             with pytest.raises(httpx.HTTPStatusError):
-                await transcribe.transcribe_voice(b"fake-ogg-data")
+                await transcribe.transcribe(ogg_file)
 
     @pytest.mark.asyncio
-    async def test_custom_base_url(self, mock_config):
+    async def test_custom_base_url(self, mock_config, ogg_file):
         mock_config.openai_base_url = "https://proxy.example.com/v1"
         resp = _mock_response(json_data={"text": "Transcribed"})
         with patch.object(
             httpx.AsyncClient, "post", new_callable=AsyncMock, return_value=resp
         ) as mock_post:
-            result = await transcribe.transcribe_voice(b"fake-ogg-data")
+            result = await transcribe.transcribe(ogg_file)
 
         assert result == "Transcribed"
         url_arg = mock_post.call_args[0][0]
         assert url_arg == "https://proxy.example.com/v1/audio/transcriptions"
 
     @pytest.mark.asyncio
-    async def test_base_url_trailing_slash_stripped(self, mock_config):
+    async def test_base_url_trailing_slash_stripped(self, mock_config, ogg_file):
         mock_config.openai_base_url = "https://proxy.example.com/v1/"
         resp = _mock_response(json_data={"text": "OK"})
         with patch.object(
             httpx.AsyncClient, "post", new_callable=AsyncMock, return_value=resp
         ) as mock_post:
-            await transcribe.transcribe_voice(b"fake-ogg-data")
+            await transcribe.transcribe(ogg_file)
 
         url_arg = mock_post.call_args[0][0]
         assert url_arg == "https://proxy.example.com/v1/audio/transcriptions"
+
+    @pytest.mark.asyncio
+    async def test_missing_api_key_raises_disabled(self, mock_config, ogg_file):
+        mock_config.openai_api_key = ""
+        with pytest.raises(transcribe.TranscriptionDisabled, match="OPENAI_API_KEY"):
+            await transcribe.transcribe(ogg_file)
+
+
+class TestTranscribeDisabled:
+    @pytest.mark.asyncio
+    async def test_off_backend_raises(self, ogg_file):
+        with patch.object(transcribe, "config") as cfg:
+            cfg.whisper_backend = "off"
+            with pytest.raises(transcribe.TranscriptionDisabled, match="disabled"):
+                await transcribe.transcribe(ogg_file)
 
 
 class TestCloseClient:
