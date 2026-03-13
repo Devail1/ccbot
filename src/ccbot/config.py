@@ -93,6 +93,13 @@ class Config:
             os.getenv("CCBOT_SHOW_HIDDEN_DIRS", "").lower() == "true"
         )
 
+        # Default root directory for the directory browser when creating new sessions
+        browse_root = os.getenv("CCBOT_BROWSE_ROOT")
+        self.browse_root: str = (
+            browse_root if browse_root and Path(browse_root).is_dir()
+            else str(Path.home())
+        )
+
         # OpenAI API for voice message transcription (optional)
         self.openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
         self.openai_base_url: str = os.getenv(
