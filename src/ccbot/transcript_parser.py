@@ -463,7 +463,12 @@ class TranscriptParser:
                 if parsed.message_type == "local_command":
                     cmd = parsed.tool_name or last_cmd_name or ""
                     text = parsed.text
-                    if cmd:
+                    # Verbose commands: collapse into expandable quote
+                    _COLLAPSE_CMDS = {"context", "/context", "memory", "/memory"}
+                    if cmd in _COLLAPSE_CMDS and "\n" in text:
+                        label = cmd if cmd.startswith("/") else f"/{cmd}"
+                        formatted = f"❯ {label}\n{cls._format_expandable_quote(text)}"
+                    elif cmd:
                         if "\n" in text:
                             formatted = f"❯ `{cmd}`\n```\n{text}\n```"
                         else:
