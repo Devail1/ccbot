@@ -281,9 +281,37 @@ class TmuxManager:
                     logger.error(f"Failed to send Enter to window {window_id}: {e}")
                     return False
 
+            # Claude Code slash commands (e.g. /clear, /compact, /context):
+            # send Escape first to interrupt any in-progress response and
+            # return to the prompt, then send the command.
+            if text.startswith("/"):
+
+                def _send_escape() -> bool:
+                    session = self.get_session()
+                    if not session:
+                        return False
+                    try:
+                        window = session.windows.get(window_id=window_id)
+                        if not window:
+                            return False
+                        pane = window.active_pane
+                        if not pane:
+                            return False
+                        pane.send_keys("Escape", enter=False, literal=False)
+                        return True
+                    except Exception as e:
+                        logger.error(
+                            f"Failed to send Escape to window {window_id}: {e}"
+                        )
+                        return False
+
+                await asyncio.to_thread(_send_escape)
+                await asyncio.sleep(1.0)
+                if not await asyncio.to_thread(_send_literal, text):
+                    return False
             # Claude Code's ! command mode: send "!" first so the TUI
             # switches to bash mode, wait 1s, then send the rest.
-            if text.startswith("!"):
+            elif text.startswith("!"):
                 if not await asyncio.to_thread(_send_literal, "!"):
                     return False
                 rest = text[1:]
